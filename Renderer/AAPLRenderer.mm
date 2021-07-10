@@ -75,7 +75,7 @@ static const float         CameraRotationSpeed      = 0.0025f;//*8;
     id<MTLRenderPipelineState> _pipeline_VolumeLighting;
     id<MTLRenderPipelineState> _pipeline_DepthDownsample;
     id<MTLRenderPipelineState> _pipeline_GaussianBlur;
-    id<MTLRenderPipelineState> _pipeline_Compsite;
+    id<MTLRenderPipelineState> _pipeline_Composite;
     id<MTLBuffer> _gaussianBlurParams[2];
 
     id<MTLTexture> _halfRes_volumeLightingResult;
@@ -741,7 +741,7 @@ static const float         CameraRotationSpeed      = 0.0025f;//*8;
         renderDescriptor.fragmentFunction = [defaultLibrary newFunctionWithName:@"composite"];
         renderDescriptor.colorAttachments[0].pixelFormat = mtkView.colorPixelFormat;
 
-        _pipeline_Compsite = [_device newRenderPipelineStateWithDescriptor:renderDescriptor error:&error];
+        _pipeline_Composite = [_device newRenderPipelineStateWithDescriptor:renderDescriptor error:&error];
     }
     {
         MTLRenderPipelineDescriptor *renderDescriptor = [[MTLRenderPipelineDescriptor alloc] init];
@@ -850,7 +850,6 @@ static const float         CameraRotationSpeed      = 0.0025f;//*8;
         
         volumeLightingParams->cameraPos = _cameraFinal.position;
         volumeLightingParams->invViewProjMatrix =matrix_invert(_viewProjMatrix);
-        volumeLightingParams->jitter = [self generateJitterOffsetForVolumeLighting];
         
     }
     // We update the shader parameters - frame constants :
@@ -885,6 +884,8 @@ static const float         CameraRotationSpeed      = 0.0025f;//*8;
         volumeLightingParams->shadowMapViewProjMatrix = frameParams[0].shadowMapViewProjMatrix;
         volumeLightingParams->frameNumber = frameNumber;
         volumeLightingParams->stepSize = _volumeLightingStepSize;
+        volumeLightingParams->area_center_radius = {SceneCenter.x, SceneCenter.y, SceneCenter.z, 800};
+        volumeLightingParams->scatteringConstant = 0.1f;
     }
     {
         
@@ -1122,75 +1123,30 @@ static const float         CameraRotationSpeed      = 0.0025f;//*8;
         [renderEncoder endEncoding];
     }
     
-    // Depth Downsample
-    if(1)
-    {
-        MTLRenderPassDescriptor* passDesc = [MTLRenderPassDescriptor renderPassDescriptor];
-        passDesc.colorAttachments[0].loadAction = MTLLoadActionDontCare;
-        passDesc.colorAttachments[0].storeAction = MTLStoreActionStore;
-
-        passDesc.colorAttachments[0].texture    = _halfRes_frameDepth;
-        
-        id<MTLRenderCommandEncoder> renderEncoder =
-            [commandBuffer renderCommandEncoderWithDescriptor:passDesc];
-        renderEncoder.label = @"Depth Downsample";
-
-        [renderEncoder setFragmentTexture:_framedepthbuffer atIndex:0];
-        [renderEncoder setRenderPipelineState:_pipeline_DepthDownsample];
-        
-        [renderEncoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
-
-        [renderEncoder endEncoding];
-        
-       // currentFrameBuffer = _framebuffers[1];
-    }
     // Volumetric Lighting
     if(_enableVolumeLighting)
     {
-        MTLRenderPassDescriptor* passDesc = [MTLRenderPassDescriptor renderPassDescriptor];
-        passDesc.colorAttachments[0].loadAction = MTLLoadActionDontCare;
-        passDesc.colorAttachments[0].storeAction = MTLStoreActionStore;
-
-        passDesc.colorAttachments[0].texture    = _halfRes_volumeLightingResult;
-        
-        id<MTLRenderCommandEncoder> renderEncoder =
-            [commandBuffer renderCommandEncoderWithDescriptor:passDesc];
-        renderEncoder.label = @"Volumetric Lighting";
-
-        [renderEncoder setFragmentBuffer:_volumeLightingParamsBuffers[_uniformBufferIndex] offset:0 atIndex:0];
-        
-        [renderEncoder setFragmentTexture:currentFrameBuffer atIndex:0];
-        [renderEncoder setFragmentTexture:_halfRes_frameDepth atIndex:1];
-        [renderEncoder setFragmentTexture:_shadowMap atIndex:2];
-        [renderEncoder setRenderPipelineState:_pipeline_VolumeLighting];
-        
-        [renderEncoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
-
-        [renderEncoder endEncoding];
-    }
-    
-    if(_enableVolumeLightingBlur && _enableVolumeLighting)
-    {
+        // Depth downsample
         {
             MTLRenderPassDescriptor* passDesc = [MTLRenderPassDescriptor renderPassDescriptor];
             passDesc.colorAttachments[0].loadAction = MTLLoadActionDontCare;
             passDesc.colorAttachments[0].storeAction = MTLStoreActionStore;
 
-            passDesc.colorAttachments[0].texture    = _halfRes_volumeLightingResult2;
+            passDesc.colorAttachments[0].texture    = _halfRes_frameDepth;
             
             id<MTLRenderCommandEncoder> renderEncoder =
                 [commandBuffer renderCommandEncoderWithDescriptor:passDesc];
-            renderEncoder.label = @"Blur Horiz";
+            renderEncoder.label = @"Depth Downsample";
 
-            [renderEncoder setFragmentTexture:_halfRes_volumeLightingResult atIndex:0];
-            [renderEncoder setFragmentTexture:_halfRes_frameDepth atIndex:1];
-            [renderEncoder setFragmentBuffer:_gaussianBlurParams[0] offset:0 atIndex:0];
-            [renderEncoder setRenderPipelineState:_pipeline_GaussianBlur];
+            [renderEncoder setFragmentTexture:_framedepthbuffer atIndex:0];
+            [renderEncoder setRenderPipelineState:_pipeline_DepthDownsample];
             
             [renderEncoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
 
             [renderEncoder endEncoding];
         }
+
+        // Lighting
         {
             MTLRenderPassDescriptor* passDesc = [MTLRenderPassDescriptor renderPassDescriptor];
             passDesc.colorAttachments[0].loadAction = MTLLoadActionDontCare;
@@ -1200,45 +1156,89 @@ static const float         CameraRotationSpeed      = 0.0025f;//*8;
             
             id<MTLRenderCommandEncoder> renderEncoder =
                 [commandBuffer renderCommandEncoderWithDescriptor:passDesc];
-            renderEncoder.label = @"Blur Horiz";
+            renderEncoder.label = @"Volumetric Lighting";
 
-            [renderEncoder setFragmentTexture:_halfRes_volumeLightingResult2 atIndex:0];
-            [renderEncoder setFragmentTexture:_halfRes_frameDepth atIndex:1];
-            [renderEncoder setFragmentBuffer:_gaussianBlurParams[1] offset:0 atIndex:0];
-            [renderEncoder setRenderPipelineState:_pipeline_GaussianBlur];
+            [renderEncoder setFragmentBuffer:_volumeLightingParamsBuffers[_uniformBufferIndex] offset:0 atIndex:0];
+            
+            [renderEncoder setFragmentTexture:_halfRes_frameDepth atIndex:0];
+            [renderEncoder setFragmentTexture:_shadowMap atIndex:1];
+            [renderEncoder setRenderPipelineState:_pipeline_VolumeLighting];
             
             [renderEncoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
 
             [renderEncoder endEncoding];
         }
-    }
+        
+        // Blur
+        if(_enableVolumeLightingBlur)
+        {
+            {
+                MTLRenderPassDescriptor* passDesc = [MTLRenderPassDescriptor renderPassDescriptor];
+                passDesc.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+                passDesc.colorAttachments[0].storeAction = MTLStoreActionStore;
 
+                passDesc.colorAttachments[0].texture    = _halfRes_volumeLightingResult2;
+                
+                id<MTLRenderCommandEncoder> renderEncoder =
+                    [commandBuffer renderCommandEncoderWithDescriptor:passDesc];
+                renderEncoder.label = @"Blur Horiz";
+
+                [renderEncoder setFragmentTexture:_halfRes_volumeLightingResult atIndex:0];
+                [renderEncoder setFragmentTexture:_halfRes_frameDepth atIndex:1];
+                [renderEncoder setFragmentBuffer:_gaussianBlurParams[0] offset:0 atIndex:0];
+                [renderEncoder setRenderPipelineState:_pipeline_GaussianBlur];
+                
+                [renderEncoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+
+                [renderEncoder endEncoding];
+            }
+            {
+                MTLRenderPassDescriptor* passDesc = [MTLRenderPassDescriptor renderPassDescriptor];
+                passDesc.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+                passDesc.colorAttachments[0].storeAction = MTLStoreActionStore;
+
+                passDesc.colorAttachments[0].texture    = _halfRes_volumeLightingResult;
+                
+                id<MTLRenderCommandEncoder> renderEncoder =
+                    [commandBuffer renderCommandEncoderWithDescriptor:passDesc];
+                renderEncoder.label = @"Blur Horiz";
+
+                [renderEncoder setFragmentTexture:_halfRes_volumeLightingResult2 atIndex:0];
+                [renderEncoder setFragmentTexture:_halfRes_frameDepth atIndex:1];
+                [renderEncoder setFragmentBuffer:_gaussianBlurParams[1] offset:0 atIndex:0];
+                [renderEncoder setRenderPipelineState:_pipeline_GaussianBlur];
+                
+                [renderEncoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+
+                [renderEncoder endEncoding];
+            }
+        }
+        // Composite
+        {
+            MTLRenderPassDescriptor* passDesc = [MTLRenderPassDescriptor renderPassDescriptor];
+            passDesc.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+            passDesc.colorAttachments[0].storeAction = MTLStoreActionStore;
+
+            passDesc.colorAttachments[0].texture    = _framebuffers[1];
+            
+            id<MTLRenderCommandEncoder> renderEncoder =
+                [commandBuffer renderCommandEncoderWithDescriptor:passDesc];
+            renderEncoder.label = @"Composite";
+
+            [renderEncoder setFragmentTexture:currentFrameBuffer atIndex:0];
+            [renderEncoder setFragmentTexture:_halfRes_volumeLightingResult atIndex:1];
+            [renderEncoder setFragmentTexture:_framedepthbuffer atIndex:2];
+            [renderEncoder setFragmentTexture:_halfRes_frameDepth atIndex:3];
+            [renderEncoder setRenderPipelineState:_pipeline_Composite];
+            
+            [renderEncoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+
+            [renderEncoder endEncoding];
+            
+            currentFrameBuffer = _framebuffers[1];
+        }
+    }
     
-    // Composite
-    if(_enableVolumeLighting)
-    {
-        MTLRenderPassDescriptor* passDesc = [MTLRenderPassDescriptor renderPassDescriptor];
-        passDesc.colorAttachments[0].loadAction = MTLLoadActionDontCare;
-        passDesc.colorAttachments[0].storeAction = MTLStoreActionStore;
-
-        passDesc.colorAttachments[0].texture    = _framebuffers[1];
-        
-        id<MTLRenderCommandEncoder> renderEncoder =
-            [commandBuffer renderCommandEncoderWithDescriptor:passDesc];
-        renderEncoder.label = @"Composite";
-
-        [renderEncoder setFragmentTexture:currentFrameBuffer atIndex:0];
-        [renderEncoder setFragmentTexture:_halfRes_volumeLightingResult atIndex:1];
-        [renderEncoder setFragmentTexture:_framedepthbuffer atIndex:2];
-        [renderEncoder setFragmentTexture:_halfRes_frameDepth atIndex:3];
-        [renderEncoder setRenderPipelineState:_pipeline_Compsite];
-        
-        [renderEncoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
-
-        [renderEncoder endEncoding];
-        
-        currentFrameBuffer = _framebuffers[1];
-    }
     if(_enableTAA)
     {
         // Resolve

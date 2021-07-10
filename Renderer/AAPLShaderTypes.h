@@ -64,9 +64,10 @@ typedef struct
 {
     int frameNumber;
     vector_float2 cameraNearFar;
-    vector_float2 jitter;
     vector_float3 cameraPos;
     vector_float3 lightDir;
+    vector_float4 area_center_radius;
+    float scatteringConstant;
     matrix_float4x4 invViewProjMatrix;
     matrix_float4x4 shadowMapViewProjMatrix;
     float stepSize;

@@ -374,37 +374,59 @@ struct ShadowMapVertexOut
 
 
 vertex ShadowMapVertexOut shadowMapVertex (const Vertex in                               [[ stage_in ]],
-                                   const uint   instanceId                       [[ instance_id ]],
                                    const device ActorParams&    actorParams      [[ buffer (BufferIndexActorParams)    ]],
                                    constant     ViewportParams& viewportParams   [[ buffer (BufferIndexViewportParams) ]] )
 {
-    float4x4 currentFrame_modelMatrix = actorParams.modelMatrix;
-    float4 currentFrame_worldPos  = currentFrame_modelMatrix * float4(in.position, 1.0);
-    float4 currentFrame_clipPos = viewportParams.viewProjectionMatrix * currentFrame_worldPos;
+    float4 worldPos  = actorParams.modelMatrix * float4(in.position, 1.0);
+    float4 clipPos = viewportParams.viewProjectionMatrix * worldPos;
     
     ShadowMapVertexOut out;
-    out.position = currentFrame_clipPos;
+    out.position = clipPos;
     return out;
 }
 
 
-fragment float4 shadowMapFragment()
+fragment void shadowMapFragment()
 {
-    return float4(1,1,1,1);
 }
 
 
-float calcScatteringFactor(float3 lightDir, float3 pos, float3 cameraPos)
+float calcScatteringFactor(float3 lightDir, float3 pos, float3 cameraPos, float scatteringConstant)
 {
     float3 vToEye = normalize(cameraPos - pos);
     float cos_theta = max(0.0, dot(vToEye, lightDir));
     
-    float g = 0.1f;
+    float g = scatteringConstant;
     float f_hg = pow(1-g,2) / sqrt(pow(4*3.141592f*(1 + g*g - 2*g*cos_theta),3));
     
     return f_hg * 50;
 }
 
+float2 findLineSphereIntersections(float3 sphereCenter, float sphereRadius,
+                                 float3 lineOrigin, float3 lineDir)
+{
+    float2 result = 0;
+    
+    float3 vOC = lineOrigin - sphereCenter;
+    float vOC_len = length(vOC);
+    float delta = pow(dot(lineDir, vOC),2) - (vOC_len*vOC_len-sphereRadius*sphereRadius);
+    
+    if(delta>0)
+    {
+        delta  =sqrt(delta);
+        result.x = -dot(lineDir, vOC)+delta;
+        result.y = -dot(lineDir, vOC)-delta;
+        
+        result = float2(min(result.x,result.y), max(result.x,result.y));
+    }
+    
+    if(vOC_len <= sphereRadius)
+    {
+        result.x = 0;
+    }
+    
+    return result;
+}
 float volumeLightingTraceRay(float3 start,
                              float3 end,
                              constant VolumeLightingParams &   volumeLightingParams,
@@ -420,10 +442,8 @@ float volumeLightingTraceRay(float3 start,
     
     float3 pos = start + direction*stepDistane * ditherOffset;
     float intensity = 0;
-    int numSteps = 0;
-    int numShadows = 0;
     
-    float3 sceneCenter = float3(0.f, -250.f, 1000.f);
+    float3 areaCenter = volumeLightingParams.area_center_radius.xyz;
     
     while(remainDistance>0)
     {
@@ -437,33 +457,29 @@ float volumeLightingTraceRay(float3 start,
         float2 shadowSamplePos = posInShadowClipSpace.xy;
         shadowSamplePos.y *= -1;
         shadowSamplePos = (shadowSamplePos+1)/2.0f;
-      //  shadowSamplePos.y = 1 - shadowSamplePos.y;
         
         float depthInShadowSpace = shadowMapBuffer.sample(sam, shadowSamplePos).x;
         
         float shadow = posInShadowClipSpace.z > depthInShadowSpace ? 0 : 1;
         
-        ++numSteps;
-        numShadows += int(1 - shadow);
-        
-        float dist_from_scene_center = distance(sceneCenter, pos);
-        shadow = dist_from_scene_center > 800 ? 0 : shadow;
+        float dist_from_scene_center = distance(areaCenter, pos);
+        shadow = dist_from_scene_center > volumeLightingParams.area_center_radius.w ? 0 : shadow;
         
         float scatterFactor = calcScatteringFactor(volumeLightingParams.lightDir,
                                                    pos,
-                                                   volumeLightingParams.cameraPos);
+                                                   volumeLightingParams.cameraPos,
+                                                   volumeLightingParams.scatteringConstant);
         
         intensity += curStepDistance / 2000.0f * shadow * scatterFactor;
     }
     
-    return pow(intensity,1);
+    return intensity;
 }
 
 fragment float4 volumeLightingFragment(quadVertexOut in [[stage_in]],
                                        constant VolumeLightingParams &   volumeLightingParams [[ buffer(0)]],
-                                       texture2d<float> currentFrameColorBuffer [[texture(0)]],
-                                       texture2d<float> depthBuffer [[texture(1)]],
-                                      texture2d<float> shadowMapBuffer [[texture(2)]])
+                                       texture2d<float> depthBuffer [[texture(0)]],
+                                      texture2d<float> shadowMapBuffer [[texture(1)]])
 {
     constexpr sampler sam(min_filter::nearest, mag_filter::nearest, mip_filter::none);
     const int ditherOffsets[16] = {
@@ -473,30 +489,37 @@ fragment float4 volumeLightingFragment(quadVertexOut in [[stage_in]],
         15,7,13,5
     };
     
-    int div = 1;
-    int ditherOffsetIndex = int(in.position.x/div)%4+(int(in.position.y/div)%4)*4 + volumeLightingParams.frameNumber;
+    int ditherOffsetIndex = int(in.position.x)%4+(int(in.position.y)%4)*4;// + volumeLightingParams.frameNumber;
     float ditherOffset = ditherOffsets[(ditherOffsetIndex)%16]/16.0;
     
-    float3 frame_color = 0;//currentFrameColorBuffer.sample(sam, in.uv).xyz;
     float depth = depthBuffer.sample(sam, in.uv).x;
     float4 rayStart = float4(in.uv.x*2-1, (1-in.uv.y)*2-1, 0, 1);
     float4 rayEnd =float4(in.uv.x*2-1, (1-in.uv.y)*2-1, depth, 1);
     
-   // rayStart.xy += volumeLightingParams.jitter;
-   // rayEnd.xy += volumeLightingParams.jitter;
-    
     rayStart = volumeLightingParams.invViewProjMatrix * rayStart;
     rayEnd = volumeLightingParams.invViewProjMatrix * rayEnd;
     
-    float color = volumeLightingTraceRay(
-                                         rayStart.xyz/rayStart.w,
-                                         rayEnd.xyz/rayEnd.w,
+    rayStart /= rayStart.w;
+    rayEnd /= rayEnd.w;
+    
+    float max_dist = distance(rayStart.xyz, rayEnd.xyz);
+    
+    float3 rayDir = normalize(rayEnd.xyz - rayStart.xyz);
+    float2 intersections = findLineSphereIntersections(volumeLightingParams.area_center_radius.xyz, volumeLightingParams.area_center_radius.w, rayStart.xyz, rayDir);
+    
+    rayEnd.xyz = rayStart.xyz + rayDir * min(max_dist,intersections.y);
+    rayStart.xyz = rayStart.xyz + rayDir * intersections.x;
+    
+    float3 light_color = float3(1,1,0.3);
+    
+    float intensity = volumeLightingTraceRay(rayStart.xyz,
+                                         rayEnd.xyz,
                                          volumeLightingParams,
                                          shadowMapBuffer,
                                          ditherOffset);
     
-    frame_color += color*float3(1,1,0);
-    return float4(frame_color,1);
+    light_color = intensity*light_color;
+    return float4(light_color,1);
 }
 
 fragment float4 depthDownsample(quadVertexOut in [[stage_in]],
@@ -504,13 +527,11 @@ fragment float4 depthDownsample(quadVertexOut in [[stage_in]],
 {
     constexpr sampler sam(min_filter::nearest, mag_filter::nearest, mip_filter::none);
     
-    float2 uv = (floor(in.position.xy) *2+0.5) / float2(1920, 1080);
+    float4 depthSamples = depthBuffer.gather(sam, in.uv);
     
-    float4 depthSamples = depthBuffer.gather(sam, uv);
+    float minDepthSample = min(depthSamples.x, min(depthSamples.y, min(depthSamples.z, depthSamples.w)));
     
-    float maxDepthSample = min(depthSamples.x, min(depthSamples.y, min(depthSamples.z, depthSamples.w)));
-    
-    return maxDepthSample;
+    return minDepthSample;
 }
 
 fragment float4 composite(quadVertexOut in [[stage_in]],
@@ -520,29 +541,25 @@ fragment float4 composite(quadVertexOut in [[stage_in]],
                           texture2d<float> halfResDepth [[texture(3)]])
 {
     constexpr sampler sam(min_filter::nearest, mag_filter::nearest, mip_filter::none);
-    constexpr sampler samLinear(min_filter::linear, mag_filter::linear, mip_filter::none);
 
     float depth = fullResDepth.sample(sam, in.uv).x;
+    
     float half_Depth = halfResDepth.sample(sam, in.uv).x;
-    
-    float half_depth_00 = halfResDepth.sample(sam, in.uv, int2(-1,0)).x;
-    float half_depth_10 = halfResDepth.sample(sam, in.uv, int2(1,0)).x;
-    float half_depth_01 = halfResDepth.sample(sam, in.uv, int2(0,1)).x;
-    float half_depth_11 = halfResDepth.sample(sam, in.uv, int2(0,-1)).x;
-    
     float diff = abs(half_Depth - depth);
-    float diff_00 = abs(half_depth_00 - depth);
-    float diff_10 = abs(half_depth_10 - depth);
-    float diff_01 = abs(half_depth_01 - depth);
-    float diff_11 = abs(half_depth_11 - depth);
+    
+    float4 half_depth_neighbors = float4(halfResDepth.sample(sam, in.uv, int2(-1,0)).x,
+                                         halfResDepth.sample(sam, in.uv, int2(1,0)).x,
+                                         halfResDepth.sample(sam, in.uv, int2(0,1)).x,
+                                         halfResDepth.sample(sam, in.uv, int2(0,-1)).x);
+    float4 diff_neighbors = abs(half_depth_neighbors - depth);
 
-    float min_diff = min(diff, min(diff_00, min(diff_01, min(diff_10, diff_11))));
+    float min_diff = min(diff, min(diff_neighbors.x, min(diff_neighbors.y, min(diff_neighbors.z, diff_neighbors.w))));
     
     int2 volumeLightingSampleCoordOffset = 0;
-    if(diff_00 == min_diff) volumeLightingSampleCoordOffset = int2(-1,0);
-    if(diff_01 == min_diff) volumeLightingSampleCoordOffset = int2(0,1);
-    if(diff_10 == min_diff) volumeLightingSampleCoordOffset = int2(1,0);
-    if(diff_11 == min_diff) volumeLightingSampleCoordOffset = int2(0,-1);
+    volumeLightingSampleCoordOffset = (diff_neighbors.x == min_diff) ? int2(-1,0) : volumeLightingSampleCoordOffset;
+    volumeLightingSampleCoordOffset = (diff_neighbors.y == min_diff) ? int2(1,0) : volumeLightingSampleCoordOffset;
+    volumeLightingSampleCoordOffset = (diff_neighbors.z == min_diff) ? int2(0,1) : volumeLightingSampleCoordOffset;
+    volumeLightingSampleCoordOffset = (diff_neighbors.w == min_diff) ? int2(0,-1) : volumeLightingSampleCoordOffset;
     
     float3 frame = frameColorTex.sample(sam, in.uv).xyz;
     float3 volumeLighting = volumeLightingTex.sample(sam, in.uv, volumeLightingSampleCoordOffset).xyz;
