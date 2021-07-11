@@ -541,6 +541,7 @@ fragment float4 composite(quadVertexOut in [[stage_in]],
                           texture2d<float> halfResDepth [[texture(3)]])
 {
     constexpr sampler sam(min_filter::nearest, mag_filter::nearest, mip_filter::none);
+    constexpr sampler samLinear(min_filter::linear, mag_filter::linear, mip_filter::none);
 
     float depth = fullResDepth.sample(sam, in.uv).x;
     
@@ -554,6 +555,7 @@ fragment float4 composite(quadVertexOut in [[stage_in]],
     float4 diff_neighbors = abs(half_depth_neighbors - depth);
 
     float min_diff = min(diff, min(diff_neighbors.x, min(diff_neighbors.y, min(diff_neighbors.z, diff_neighbors.w))));
+    float max_diff = max(diff, max(diff_neighbors.x, max(diff_neighbors.y, max(diff_neighbors.z, diff_neighbors.w))));
     
     int2 volumeLightingSampleCoordOffset = 0;
     volumeLightingSampleCoordOffset = (diff_neighbors.x == min_diff) ? int2(-1,0) : volumeLightingSampleCoordOffset;
@@ -562,7 +564,8 @@ fragment float4 composite(quadVertexOut in [[stage_in]],
     volumeLightingSampleCoordOffset = (diff_neighbors.w == min_diff) ? int2(0,-1) : volumeLightingSampleCoordOffset;
     
     float3 frame = frameColorTex.sample(sam, in.uv).xyz;
-    float3 volumeLighting = volumeLightingTex.sample(sam, in.uv, volumeLightingSampleCoordOffset).xyz;
+    float3 volumeLighting = max_diff > 0.01 ?
+    volumeLightingTex.sample(sam, in.uv, volumeLightingSampleCoordOffset).xyz : volumeLightingTex.sample(samLinear, in.uv).xyz;
     
     return float4(frame + volumeLighting, 1);
 }
